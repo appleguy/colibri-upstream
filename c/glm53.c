@@ -2318,6 +2318,39 @@ static int glm53_vk_load(void *ctx, int index, int e, VktExpertSrc *src, void **
     return glm53_vk_load_batch(ctx, index, &e, 1, src, h) == 1;
 }
 static void glm53_vk_unhold(void *ctx, void *h) { (void)ctx; glm53_drop_rows((Slot *)h); }
+/* Decode with the experts on the host: run all of a layer's experts (gate and up rows, swiglu, down rows) in ONE
+ * parallel region, not the three mlp3_rows opens per expert, whose fork/join cost (about 75 us each on a Threadripper
+ * PRO 5955WX) held an expert to about a third of the DRAM read rate. i4g_dot is the per-row loop of matmul_i4_grouped,
+ * so the bits match it, except on SSE4.1-only builds, whose rows4 kernel sums in a different order. GLM53_FUSED_HOST=0
+ * turns it off. dst[e] is expert e's output row (hidden floats). */
+static int host_experts_fused(int n, const Mat *g, const Mat *u, const Mat *d, const float *x,
+                              float limit, float *const *dst) {
+    const int I = g[0].rows, Dn = g[0].columns, D = d[0].rows, gs = g[0].gs;
+    const int rbg = (Dn + 1) / 2, ngg = (Dn + gs - 1) / gs, rbd = (I + 1) / 2, ngd = (I + gs - 1) / gs;
+    float *buf = malloc((size_t)2 * n * I * sizeof(float));
+    if (!buf) return 0;
+    float *sgb = buf, *sub = buf + (size_t)n * I;
+    #pragma omp parallel
+    {
+        #pragma omp for schedule(static)
+        for (int z = 0; z < 2 * n * I; z++) {
+            const int e = z / (2 * I), r = z % (2 * I), up = r >= I, o = up ? r - I : r;
+            const Mat *w = up ? &u[e] : &g[e];
+            (up ? sub : sgb)[(size_t)e * I + o] =
+                i4g_dot(w->q4 + (size_t)o * rbg, w->s + (size_t)o * ngg, x, Dn, gs);
+        }
+        #pragma omp for schedule(static)
+        for (int e = 0; e < n; e++) swiglu_clamped(sgb + (size_t)e * I, sub + (size_t)e * I, I, limit);
+        #pragma omp for schedule(static)
+        for (int z = 0; z < n * D; z++) {
+            const int e = z / D, o = z % D;
+            dst[e][o] = i4g_dot(d[e].q4 + (size_t)o * rbd, d[e].s + (size_t)o * ngd, sgb + (size_t)e * I, I, gs);
+        }
+    }
+    free(buf);
+    return 1;
+}
+
 /* Pairs i of one block that want[i] marks, on the CPU: their experts in first-seen
  * order, in blocks of the layer's cache slots as ffn_layer reads them, each computed
  * once for all its rows into ctb[i]. note: offer each to the tier. */
@@ -2340,6 +2373,37 @@ static void ffn_vk_cpu(GModel *m, int index, const float *x, int rows, int K, co
     for (int base = 0; base < nu; base += block) {
         const int here = base + block <= nu ? block : nu - base;
         expert_block_read(m, index, uq + base, here, slot_of, to_read);
+        if (rows == 1 && here >= 2 && here <= 32) {   /* decode: every expert of the block in one parallel region */
+            static int fused_on = -1;
+            if (fused_on < 0) { const char *e = getenv("GLM53_FUSED_HOST"); fused_on = !e || atoi(e); }
+            Mat fg[32], fu[32], fd[32]; float *dst[32]; int pos[32], ok = fused_on;
+            for (int u = 0; u < here && ok; u++) {
+                const int eid = uq[base + u];
+                Slot *slot = &cache->s[slot_of[u]];
+                slot->used = ++m->clock;
+                expert_mats(m, index, slot, &fg[u], &fu[u], &fd[u]);
+                ok = fg[u].fmt == 4 && fu[u].fmt == 4 && fd[u].fmt == 4 && fg[u].q4 && fu[u].q4 && fd[u].q4 &&
+                     !fg[u].resident && fg[u].gs == fg[0].gs && fg[u].rows == fg[0].rows && fg[u].columns == fg[0].columns &&
+                     fu[u].gs == fg[0].gs && fu[u].rows == fg[0].rows && fu[u].columns == fg[0].columns &&
+                     fd[u].gs == fg[0].gs && fd[u].rows == D && fd[u].columns == fg[0].rows;
+                pos[u] = -1;
+                for (int i = 0; i < n; i++) if (want[i] && ib[i] == eid) { pos[u] = i; break; }
+                ok = ok && pos[u] >= 0;
+                dst[u] = pos[u] >= 0 ? ctb + (size_t)pos[u] * D : NULL;
+            }
+            if (ok && host_experts_fused(here, fg, fu, fd, x, c->swiglu_limit, dst)) {
+                for (int u = 0; u < here; u++) {
+                    const int eid = uq[base + u];
+                    Slot *slot = &cache->s[slot_of[u]];
+                    if (note && (!g53_gx_ilv(m, index) || XT(wants)(index, eid))) {
+                        VktExpertSrc src = glm53_slot_src(m, index, slot);
+                        XT(note)(index, eid, &src);
+                        glm53_drop_rows(slot);
+                    }
+                }
+                continue;
+            }
+        }
         for (int u = 0; u < here; u++) {
             const int eid = uq[base + u];
             Slot *slot = &cache->s[slot_of[u]];
