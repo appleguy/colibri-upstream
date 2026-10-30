@@ -36,7 +36,7 @@ jobs:
           SELECTED_PR: ${{ inputs.pr }}
         run: |
           case "$SELECTED_PR" in
-            2507) sha=3222839f5a7a5c305c85e1b81a595a075c626114 ;;
+            2507) sha=d52cde84e558791987838a1124ee1c6174697174 ;;
             2509) sha=81eaf8073cb2970e4760a9caa534a4b13118261d ;;
             2506) sha=17ad27e5b35fba317bd71539a676a34f606b14ae ;;
             *) echo "Unrecognized exact PR input"; exit 2 ;;
