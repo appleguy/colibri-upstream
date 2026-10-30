@@ -138,7 +138,10 @@ jobs:
               ./tests/test_compat_direct.exe
               cp compat.h compat.h.selected
               trap 'mv compat.h.selected compat.h' EXIT
-              git show 22e844096dc2f8ad6f64e79cdfd9cd75681737f2:c/compat.h > compat.h
+              # Reverse exactly the one added flag, without relying on git
+              # inside MSYS2 or shallow-history availability.
+              test "$(grep -c 'FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED' compat.h)" = 1
+              sed -i 's/FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED/FILE_FLAG_NO_BUFFERING/' compat.h
               gcc -O2 -D_FILE_OFFSET_BITS=64 -fopenmp -o tests/test_compat_direct_baseline.exe tests/test_compat_direct.c -lpsapi
               if ./tests/test_compat_direct_baseline.exe > baseline-error.log 2>&1; then
                 echo "FAIL: unmodified sync-handle baseline unexpectedly passed"
@@ -148,7 +151,7 @@ jobs:
               echo "PASS: unmodified baseline failed the intended handle-mode negative control"
               mv compat.h.selected compat.h
               trap - EXIT
-              git diff --exit-code -- compat.h
+              grep -q 'FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED' compat.h
               ;;
             2506)
               ./tests/test_glm53_host.exe
