@@ -1,0 +1,150 @@
+# Manual-only exact six-PR integration, immutable PR commit IDs, no paid inference.
+name: "Colibri six-PR exact-source CPU qualification"
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: colibri-six-pr-integrated-20261030
+  cancel-in-progress: false
+
+jobs:
+  combined-source:
+    name: "Six exact PRs / ${{ matrix.os }}"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout exact #2519 original head
+        uses: actions/checkout@v4
+        with:
+          ref: 98fa85e99957858f6e3490d1ecefa469d0f80955
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Fetch and apply five other exact public PR heads
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=22e844096dc2f8ad6f64e79cdfd9cd75681737f2
+          test "$(git rev-parse HEAD)" = 98fa85e99957858f6e3490d1ecefa469d0f80955
+          test "$(git rev-parse HEAD^)" = "$base"
+          git fetch --no-tags --depth=2 https://github.com/appleguy/colibri-upstream.git \
+            +refs/heads/pr/glm53-accept-before-prefill:refs/remotes/ci/p2508 \
+            +refs/heads/pr/gateway-expert-map-generation:refs/remotes/ci/p2514 \
+            +refs/heads/pr/glm53-preserve-live-prefix:refs/remotes/ci/p2507 \
+            +refs/heads/pr/windows-direct-overlapped-dev:refs/remotes/ci/p2509 \
+            +refs/heads/pr/glm53-exact-host:refs/remotes/ci/p2506
+          for line in \
+            "2508 ef7a58fe796b4d5603ede23994312ab0454c6875" \
+            "2514 aa4ab4f28516169a87b278e86b7e686c1f5f5004" \
+            "2507 09cbeac133f0e34e7a32aa3e3178be4d30975e38" \
+            "2509 81eaf8073cb2970e4760a9caa534a4b13118261d" \
+            "2506 17ad27e5b35fba317bd71539a676a34f606b14ae"
+          do
+            set -- $line
+            n="$1"; sha="$2"
+            test "$(git rev-parse "refs/remotes/ci/p$n")" = "$sha"
+            test "$(git rev-parse "$sha^")" = "$base"
+            git diff --binary "$base" "$sha" > "$RUNNER_TEMP/p$n.patch"
+            git apply --check "$RUNNER_TEMP/p$n.patch"
+            git apply "$RUNNER_TEMP/p$n.patch"
+            echo "APPLIED original PR #$n at $sha"
+          done
+          git diff --check
+          git add -A
+          tree="$(git write-tree)"
+          echo "EXACT_SIX_PR_TREE=$tree"
+          test "$tree" = "85dc3d114cba0c78299be72fd4f19d9ba12cfdbb"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install official CPU-only generated GLM reference dependencies
+        run: python -m pip install --disable-pip-version-check -r c/tools/requirements-glm53-tiny.txt
+
+      - name: Install native Windows UCRT64 compiler
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python
+
+      - name: Install native OpenMP runtime on macOS
+        if: runner.os == 'macOS'
+        run: brew install libomp
+
+      - name: Build six-PR CPU engine and C checks (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: make -C c -j2 glm53 tests/test_glm53_live_prefix tests/test_glm53_host tests/test_compat_direct
+
+      - name: Run native C checks (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          c/tests/test_glm53_live_prefix
+          c/tests/test_glm53_host
+          output="$(c/tests/test_compat_direct)"
+          echo "$output"
+          [[ "$output" == *"skipped (POSIX"* ]]
+
+      - name: Build six-PR CPU engine and C checks (Windows UCRT64)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: make -C c -j2 glm53 tests/test_glm53_live_prefix.exe tests/test_glm53_host.exe tests/test_compat_direct.exe
+
+      - name: Run Windows exact host and overlapped direct I/O checks
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -e
+          cd c
+          ./tests/test_glm53_live_prefix.exe
+          ./tests/test_glm53_host.exe
+          ./tests/test_compat_direct.exe
+          gcc -O2 -D_FILE_OFFSET_BITS=64 -fopenmp -msse4.1 -mno-avx2 -mno-fma \
+            tests/test_glm53_host.c -o tests/test_glm53_host_sse.exe -lm
+          ./tests/test_glm53_host_sse.exe
+
+      - name: Generate official Transformers GLM text and multimodal tiny models
+        shell: bash
+        run: |
+          python c/tools/make_glm53_tiny.py --output c/_qa_text
+          python c/tools/make_glm53_multimodal_tiny.py --output c/_qa_mm
+
+      - name: Run six-PR integrated policy, protocol, gateway and model oracles (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          GLM53_TINY: ${{ github.workspace }}/c/_qa_text
+          GLM53_MM_TINY: ${{ github.workspace }}/c/_qa_mm
+          COLI_GLM53_FIXTURE: ${{ github.workspace }}/c/_qa_mm
+          PYTHONPATH: ${{ github.workspace }}/c:${{ github.workspace }}/c/tests
+        run: |
+          set -e
+          cd c
+          python -m unittest discover -s tests -p test_glm53_busy_harness.py -v
+          python -m unittest -v tests.test_glm53_accept test_expert_map_generation test_coli_gateway_stream_completion tests.test_glm53_oracles
+
+      - name: Run six-PR integrated policy, protocol, gateway and model oracles (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -e
+          export GLM53_TINY="$(cygpath -w "$PWD/c/_qa_text")"
+          export GLM53_MM_TINY="$(cygpath -w "$PWD/c/_qa_mm")"
+          export COLI_GLM53_FIXTURE="$GLM53_MM_TINY"
+          export PYTHONPATH="$(cygpath -w "$PWD/c");$(cygpath -w "$PWD/c/tests")"
+          cd c
+          python -m unittest discover -s tests -p test_glm53_busy_harness.py -v
+          python -m unittest -v tests.test_glm53_accept test_expert_map_generation test_coli_gateway_stream_completion tests.test_glm53_oracles
