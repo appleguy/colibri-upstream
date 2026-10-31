@@ -49,6 +49,7 @@ jobs:
           install: >-
             make
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python
       - name: Actual-source 1800 token RNG and 600 mass order oracle
         if: runner.os != 'Windows'
         shell: bash
