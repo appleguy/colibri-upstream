@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: glm-trio-20261030-${{ inputs.pr }}
+  group: glm-b275-targeted-20261030-${{ inputs.pr }}
   cancel-in-progress: false
 
 jobs:
@@ -187,15 +187,18 @@ jobs:
           cd c
           python -m unittest -v tests.test_glm53_oracles
 
-      - name: Full native ASan/UBSan and generated-model serve on Linux
+      - name: Targeted native ASan/UBSan and generated-model serve on Linux
         if: runner.os == 'Linux' && inputs.pr != '2509'
         shell: bash
         env:
           ASAN_OPTIONS: detect_leaks=0:detect_stack_use_after_return=0
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
-          make -C c test-asan
-          make -C c -j2 glm53 EXTRA_CFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" EXTRA_LDFLAGS="-fsanitize=address,undefined"
+          # The comprehensive C suite is running on the prior code-identical commit;
+          # this exact b275 run uses an isolated targeted instrumented GLM oracle.
+          make -C c clean
+          make -C c -j2 glm53 tests/test_glm53_live_prefix EXTRA_CFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" EXTRA_LDFLAGS="-fsanitize=address,undefined"
+          c/tests/test_glm53_live_prefix
           export GLM53_TINY="$GITHUB_WORKSPACE/c/_qa_text"
           export GLM53_MM_TINY="$GITHUB_WORKSPACE/c/_qa_mm"
           (cd c && python -m unittest -v tests.test_glm53_oracles)
