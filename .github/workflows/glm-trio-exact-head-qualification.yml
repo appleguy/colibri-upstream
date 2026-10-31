@@ -212,7 +212,8 @@ jobs:
         if: runner.os == 'Windows' && inputs.pr == '2509'
         shell: msys2 {0}
         run: |
-          test "$(git rev-parse HEAD)" = "81eaf8073cb2970e4760a9caa534a4b13118261d"
+          # Source SHA was verified in the earlier bash shell, before tests.
+          # MSYS2 UCRT64 does not install git in its own PATH.
           cp qa/qualification/test_pr2509_direct_expert_stress.c c/tests/qa_direct_stress.c
           cp qa/qualification/test_pr2509_sparse_large_offset.c c/tests/qa_sparse_4gib.c
           cd c
