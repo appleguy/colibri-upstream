@@ -199,3 +199,25 @@ jobs:
           export GLM53_TINY="$GITHUB_WORKSPACE/c/_qa_text"
           export GLM53_MM_TINY="$GITHUB_WORKSPACE/c/_qa_mm"
           (cd c && python -m unittest -v tests.test_glm53_oracles)
+
+      - name: Checkout isolated Windows I/O fixture sources
+        if: runner.os == 'Windows' && inputs.pr == '2509'
+        uses: actions/checkout@v4
+        with:
+          ref: ci/glm-exact-windows-io-extra-20261030
+          path: qa
+          persist-credentials: false
+
+      - name: 16-worker direct I/O and sparse 4GiB Windows regression
+        if: runner.os == 'Windows' && inputs.pr == '2509'
+        shell: msys2 {0}
+        run: |
+          test "$(git rev-parse HEAD)" = "81eaf8073cb2970e4760a9caa534a4b13118261d"
+          cp qa/qualification/test_pr2509_direct_expert_stress.c c/tests/qa_direct_stress.c
+          cp qa/qualification/test_pr2509_sparse_large_offset.c c/tests/qa_sparse_4gib.c
+          cd c
+          gcc -O2 -D_FILE_OFFSET_BITS=64 -fopenmp -o tests/qa_direct_stress.exe tests/qa_direct_stress.c -lpsapi
+          gcc -O2 -D_FILE_OFFSET_BITS=64 -fopenmp -o tests/qa_sparse_4gib.exe tests/qa_sparse_4gib.c -lpsapi
+          ./tests/qa_direct_stress.exe
+          ./tests/qa_sparse_4gib.exe
+          echo "PASS: native Windows exact #2509 16-worker direct-read and sparse high-offset oracles"
