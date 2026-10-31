@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: appleguy/colibri-upstream
-          ref: 00229be3114e657948b1a08788f673d048554e4d
+          ref: 3b589e6ee8f5e7c88b1c0345991653eba1f7f297
           persist-credentials: false
       - name: Install Python for source fingerprint verification
         uses: actions/setup-python@v5
@@ -35,7 +35,7 @@ jobs:
       - name: Verify exact commit and byte-identical 2518 selector
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = "00229be3114e657948b1a08788f673d048554e4d"
+          test "$(git rev-parse HEAD)" = "3b589e6ee8f5e7c88b1c0345991653eba1f7f297"
           python -c "from pathlib import Path;import hashlib;assert hashlib.sha256(Path('c/glm53_exact_nucleus.h').read_bytes().replace(bytes([13,10]),bytes([10]))).hexdigest()=='de079b5d9c217ebc3eedf50a5448000a4c4f6b7cc8c81448d6bcce1d28af4d8a'"
       - name: Install native ARM64 OpenMP compile dependency
         if: runner.os == 'macOS'
