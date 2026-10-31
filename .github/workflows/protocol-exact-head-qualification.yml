@@ -1,23 +1,25 @@
-# Manual, no paid inference. Source commits are fixed inside workflow, not user inputs.
+# Manual-only, exact-source, generated-tiny CPU qualification of #2519 + #2508 + #2514.
+# Stored only on an isolated owner-fork CI branch. Public standard hosted runners, no paid inference.
 name: "Protocol exact-head acceptance and telemetry"
 on:
   workflow_dispatch:
     inputs:
       pr:
-        description: "Qualify one fixed upstream PR head"
+        description: "Fixed three-PR integration (preserves public PR heads)"
         required: true
         type: choice
-        options: ['2508', '2514']
+        options: ['integrated']
 
 permissions:
   contents: read
 concurrency:
-  group: protocol-exact-${{ inputs.pr }}
+  group: protocol-three-pr-integration-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  cpu-oracles:
-    name: "PR${{ inputs.pr }} native / ${{ matrix.os }}"
+  combined-native:
+    if: inputs.pr == 'integrated'
+    name: "Protocol stack native / ${{ matrix.os }}"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     strategy:
@@ -25,22 +27,42 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - name: Check out the exact published upstream PR source
+      - name: Checkout exact original PR2519 commit (not a merge ref)
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.pr == '2508' && 'ef7a58fe796b4d5603ede23994312ab0454c6875' || 'aa4ab4f28516169a87b278e86b7e686c1f5f5004' }}
+          ref: 98fa85e99957858f6e3490d1ecefa469d0f80955
+          fetch-depth: 2
           persist-credentials: false
-      - name: Assert source SHA, not fork main or merge commit
+      - name: Compose original public PR commits without commits, merges, or rewrites
         shell: bash
-        env:
-          EXPECTED_SHA: ${{ inputs.pr == '2508' && 'ef7a58fe796b4d5603ede23994312ab0454c6875' || 'aa4ab4f28516169a87b278e86b7e686c1f5f5004' }}
         run: |
-          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          set -euo pipefail
+          base=22e844096dc2f8ad6f64e79cdfd9cd75681737f2
+          b2519=98fa85e99957858f6e3490d1ecefa469d0f80955
+          b2508=ef7a58fe796b4d5603ede23994312ab0454c6875
+          b2514=aa4ab4f28516169a87b278e86b7e686c1f5f5004
+          test "$(git rev-parse HEAD)" = "$b2519"
+          test "$(git rev-parse HEAD^)" = "$base"
+          git fetch --no-tags --depth=2 https://github.com/appleguy/colibri-upstream.git \
+            +refs/heads/pr/glm53-accept-before-prefill:refs/remotes/ci/accept \
+            +refs/heads/pr/gateway-expert-map-generation:refs/remotes/ci/emap
+          test "$(git rev-parse refs/remotes/ci/accept)" = "$b2508"
+          test "$(git rev-parse refs/remotes/ci/emap)" = "$b2514"
+          test "$(git rev-parse "$b2508^")" = "$base"
+          test "$(git rev-parse "$b2514^")" = "$base"
+          git diff --binary "$base" "$b2508" > "$RUNNER_TEMP/pr2508.patch"
+          git diff --binary "$base" "$b2514" > "$RUNNER_TEMP/pr2514.patch"
+          git apply --check "$RUNNER_TEMP/pr2508.patch"
+          git apply "$RUNNER_TEMP/pr2508.patch"
+          git apply --check "$RUNNER_TEMP/pr2514.patch"
+          git apply "$RUNNER_TEMP/pr2514.patch"
           git diff --check
+          test "$(git rev-parse HEAD)" = "$b2519"
+          echo "Exact combined PR sources: base=$base, #2519=$b2519, #2508=$b2508, #2514=$b2514"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Install pinned generated-GLM oracle dependencies (public standard runner)
+      - name: Install pinned free generated tiny-oracle dependencies
         run: python -m pip install --disable-pip-version-check -r c/tools/requirements-glm53-tiny.txt
       - name: Install MSYS2 UCRT64 (Windows)
         if: runner.os == 'Windows'
@@ -55,78 +77,40 @@ jobs:
       - name: Install libomp (macOS)
         if: runner.os == 'macOS'
         run: brew install libomp
-      - name: Native CPU GLM build (Linux/macOS)
+      - name: Build combined native CPU GLM53 (Linux/macOS)
         if: runner.os != 'Windows'
         run: make -C c -j2 glm53
-      - name: Native CPU GLM build (Windows UCRT64)
+      - name: Build combined native CPU GLM53 (Windows UCRT64)
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: make -C c -j2 glm53
-      - name: Generate pinned upstream text and multimodal tiny model fixtures
+      - name: Generate pinned text and multimodal GLM53 fixtures
         shell: bash
         run: |
           python c/tools/make_glm53_tiny.py --output c/_qa_text
           python c/tools/make_glm53_multimodal_tiny.py --output c/_qa_mm
-      - name: Original-head early ACCEPT native protocol tests (Linux/macOS)
-        if: inputs.pr == '2508' && runner.os != 'Windows'
-        shell: bash
-        env:
-          COLI_GLM53_FIXTURE: ${{ github.workspace }}/c/_qa_mm
-        run: |
-          cd c
-          python -m unittest -v tests.test_glm53_accept
-      - name: Original-head early ACCEPT native protocol tests (Windows)
-        if: inputs.pr == '2508' && runner.os == 'Windows'
-        shell: msys2 {0}
-        run: |
-          export COLI_GLM53_FIXTURE="$(cygpath -w "$PWD/c/_qa_mm")"
-          cd c
-          python -m unittest -v tests.test_glm53_accept
-      - name: Original-head gateway telemetry HTTP and dispatcher tests (Linux/macOS)
-        if: inputs.pr == '2514' && runner.os != 'Windows'
-        shell: bash
-        run: |
-          python - <<'PY'
-          import sys, unittest
-          sys.path[:0] = ["c", "c/tests"]
-          suite = unittest.defaultTestLoader.loadTestsFromNames(["test_expert_map_generation", "test_coli_gateway_stream_completion"])
-          result = unittest.TextTestRunner(verbosity=2).run(suite)
-          raise SystemExit(0 if result.wasSuccessful() and result.testsRun == 14 else 1)
-          PY
-      - name: Original-head gateway telemetry HTTP and dispatcher tests (Windows)
-        if: inputs.pr == '2514' && runner.os == 'Windows'
-        shell: msys2 {0}
-        run: |
-          python - <<'PY'
-          import sys, unittest
-          sys.path[:0] = ["c", "c/tests"]
-          suite = unittest.defaultTestLoader.loadTestsFromNames(["test_expert_map_generation", "test_coli_gateway_stream_completion"])
-          result = unittest.TextTestRunner(verbosity=2).run(suite)
-          raise SystemExit(0 if result.wasSuccessful() and result.testsRun == 14 else 1)
-          PY
-      - name: Overlay only #2519 corrected serve test harness (no production changes)
-        shell: bash
-        run: |
-          test "$(git rev-parse HEAD)" = "${{ inputs.pr == '2508' && 'ef7a58fe796b4d5603ede23994312ab0454c6875' || 'aa4ab4f28516169a87b278e86b7e686c1f5f5004' }}"
-          git fetch --no-tags --depth=1 https://github.com/appleguy/colibri-upstream.git 98fa85e99957858f6e3490d1ecefa469d0f80955
-          test "$(git rev-parse FETCH_HEAD)" = "98fa85e99957858f6e3490d1ecefa469d0f80955"
-          git show FETCH_HEAD:c/tests/glm53_serve_harness.py > c/tests/glm53_serve_harness.py
-          test "$(git diff --name-only)" = "c/tests/glm53_serve_harness.py"
-          git diff --check
-      - name: Full generated text/multimodal/pin/serve oracle, test-only overlay (Linux/macOS)
+      - name: Run 33 combined protocol, ACCEPT, gateway and oracle tests (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
         env:
           GLM53_TINY: ${{ github.workspace }}/c/_qa_text
           GLM53_MM_TINY: ${{ github.workspace }}/c/_qa_mm
+          COLI_GLM53_FIXTURE: ${{ github.workspace }}/c/_qa_mm
+          PYTHONPATH: ${{ github.workspace }}/c:${{ github.workspace }}/c/tests
         run: |
+          set -e
           cd c
-          python -m unittest -v tests.test_glm53_oracles
-      - name: Full generated text/multimodal/pin/serve oracle, test-only overlay (Windows)
+          python -m unittest discover -s tests -p test_glm53_busy_harness.py -v
+          python -m unittest -v tests.test_glm53_accept test_expert_map_generation test_coli_gateway_stream_completion tests.test_glm53_oracles
+      - name: Run 33 combined protocol, ACCEPT, gateway and oracle tests (Windows UCRT64)
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
+          set -e
           export GLM53_TINY="$(cygpath -w "$PWD/c/_qa_text")"
           export GLM53_MM_TINY="$(cygpath -w "$PWD/c/_qa_mm")"
+          export COLI_GLM53_FIXTURE="$GLM53_MM_TINY"
+          export PYTHONPATH="$(cygpath -w "$PWD/c");$(cygpath -w "$PWD/c/tests")"
           cd c
-          python -m unittest -v tests.test_glm53_oracles
+          python -m unittest discover -s tests -p test_glm53_busy_harness.py -v
+          python -m unittest -v tests.test_glm53_accept test_expert_map_generation test_coli_gateway_stream_completion tests.test_glm53_oracles
