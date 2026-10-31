@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "00229be3114e657948b1a08788f673d048554e4d"
-          python -c "from pathlib import Path;import hashlib;assert hashlib.sha256(Path('c/glm53_exact_nucleus.h').read_bytes()).hexdigest()=='de079b5d9c217ebc3eedf50a5448000a4c4f6b7cc8c81448d6bcce1d28af4d8a'"
+          python -c "from pathlib import Path;import hashlib;assert hashlib.sha256(Path('c/glm53_exact_nucleus.h').read_bytes().replace(bytes([13,10]),bytes([10]))).hexdigest()=='de079b5d9c217ebc3eedf50a5448000a4c4f6b7cc8c81448d6bcce1d28af4d8a'"
       - name: Install native ARM64 OpenMP compile dependency
         if: runner.os == 'macOS'
         run: brew install libomp
