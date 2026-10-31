@@ -100,3 +100,83 @@ jobs:
         run: |
           python -m unittest discover -s c/tests -p test_metal_resolve_device.py -v
           echo "A hardware SKIP does not qualify Metal device behavior; existing M2 on-device receipt is separate."
+      - name: Generated GLM53 INT4-streaming model, real Metal dispatch and CPU parity
+        if: inputs.pr == '2512' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install libomp
+          python -m pip install --disable-pip-version-check -r c/tools/requirements-glm53-tiny.txt
+          make -C c -j2 glm53 METAL=0 VK=0 CUDA=0
+          cp c/glm53 c/glm53_exact_cpu_qa
+          make -C c -j2 glm53 METAL=1 VK=0 CUDA=0
+          cp c/glm53 c/glm53_exact_metal_qa
+          python c/tools/make_glm53_tiny.py --output c/qa_f32
+          python c/tools/make_glm53_streaming_pair.py --fixture c/qa_f32 --output c/qa_stream
+          python - <<'PY'
+          import json, math, os, re, subprocess
+          from pathlib import Path
+          C=Path("c")
+          fixture=json.loads((C/"qa_f32/ref.json").read_text())
+          modes=[
+            ("deq_cpu","glm53_exact_cpu_qa","qa_stream-deq","0.05",False),
+            ("wide_cpu","glm53_exact_cpu_qa","qa_stream-i4","0.05",False),
+            ("narrow_cpu","glm53_exact_cpu_qa","qa_stream-i4","0.000001",False),
+            ("wide_metal","glm53_exact_metal_qa","qa_stream-i4","0.05",True),
+            ("narrow_metal","glm53_exact_metal_qa","qa_stream-i4","0.000001",True),
+          ]
+          scenarios=[
+            ("pinned_reference",fixture["prompt_ids"],len(fixture["greedy_new_ids"])),
+            ("long64", [4+((i*19+7)%124) for i in range(64)],24),
+            ("long80", [4+((i*19+7)%124) for i in range(80)],32),
+          ]
+          def extract(stdout):
+            parts={}
+            for line in stdout.splitlines():
+              toks=line.split()
+              if toks and toks[0] in ("greedy","teacher_forcing"):
+                parts[toks[0]]=[int(x) for x in toks[1:]]
+              if toks and toks[0]=="last_logits":
+                parts["logits"]=[float(x) for x in toks[1:]]
+            m=re.search(r"^metal moe attempts (\d+) ok (\d+) fallback (\d+) rows (\d+)$",stdout,re.M)
+            if m: parts["metal"]=tuple(int(x) for x in m.groups())
+            m=re.search(r"^experts hits (\d+) miss (\d+) bytes (\d+)$",stdout,re.M)
+            if m: parts["cache"]=tuple(int(x) for x in m.groups())
+            return parts
+          for name,prompt,num in scenarios:
+            results={}
+            for label,exe,model,budget,metal in modes:
+              env=dict(os.environ,OMP_NUM_THREADS="2",GLM53_BITS="32",
+                       GLM53_VERBOSE="1",GLM53_EXPERT_GB=budget,COLI_METAL="1" if metal else "0")
+              cmd=[str(C/exe),"--model",str(C/model),"--ids",",".join(map(str,prompt)),
+                   "--greedy",str(num),"--logits"]
+              p=subprocess.run(cmd,env=env,capture_output=True,text=True,timeout=90)
+              if p.returncode:
+                raise RuntimeError(f"{name}/{label}: process exited {p.returncode}: {p.stderr[-1500:]}")
+              r=extract(p.stdout)
+              if len(r.get("greedy",[]))!=num or len(r.get("teacher_forcing",[]))!=len(prompt):
+                raise AssertionError(f"{name}/{label} returned incorrect length")
+              if metal:
+                a,ok,fb,rows=r.get("metal",(0,0,-1,0))
+                assert a>0 and a==ok and fb==0 and rows>0, (name,label,r)
+              if "logits" not in r or not all(math.isfinite(x) for x in r["logits"]):
+                raise AssertionError(f"{name}/{label} invalid logits")
+              results[label]=r
+            ref=results["deq_cpu"]
+            if name=="pinned_reference":
+              assert ref["greedy"]==fixture["greedy_new_ids"],"generated reference greedy mismatch"
+              assert ref["teacher_forcing"]==fixture["teacher_forcing_ids"],"teacher forcing mismatch"
+            for label in results:
+              r=results[label]
+              assert r["greedy"]==ref["greedy"],(name,label,"greedy drift")
+              assert r["teacher_forcing"]==ref["teacher_forcing"],(name,label,"teacher forcing drift")
+              delta=max(abs(x-y) for x,y in zip(r["logits"],ref["logits"]))
+              assert delta<1e-4,(name,label,delta)
+            wide=results["wide_cpu"]["cache"]; narrow=results["narrow_cpu"]["cache"]
+            assert narrow[1]>wide[1],(name,"cache eviction not exercised",wide,narrow)
+            m1=results["wide_metal"]["metal"];m2=results["narrow_metal"]["metal"]
+            print(f"PASS {name} prompt={len(prompt)} decode={num} "
+                  f"GPU wide={m1[1]}/{m1[0]} narrow={m2[1]}/{m2[0]} "
+                  f"zero fallback, CPU/Metal/reference token match and max_abs_logit<1e-4 "
+                  f"cache_misses {wide[1]}->{narrow[1]}",flush=True)
+          print("PASS all 3 exact-head generated GLM model scenarios on real Metal",flush=True)
+          PY
