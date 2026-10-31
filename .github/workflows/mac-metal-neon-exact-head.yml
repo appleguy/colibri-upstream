@@ -1,0 +1,102 @@
+# Manual-only QA on public standard hosted runners. No paid inference, model weights, or self-hosted jobs.
+name: "Mac Metal + NEON: exact-head qualification"
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "One of two pinned, reviewed PR source revisions"
+        required: true
+        type: choice
+        options:
+          - "2512"
+          - "2511"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-pr-20261030-${{ inputs.pr }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: "PR #${{ inputs.pr }} / ${{ matrix.os }}"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Exact PR source, not a merge ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr == '2512' && 'bffabb3f5bcde4ed1abc75f09d0c41a1e5046543' || '929cb6de2e43a128e6de17d6da7a968d136e8d8c' }}
+          persist-credentials: false
+      - name: Verify source SHA and clean diff
+        shell: bash
+        env:
+          SELECTED_PR: ${{ inputs.pr }}
+        run: |
+          case "$SELECTED_PR" in
+            2512) expected=bffabb3f5bcde4ed1abc75f09d0c41a1e5046543 ;;
+            2511) expected=929cb6de2e43a128e6de17d6da7a968d136e8d8c ;;
+            *) exit 2 ;;
+          esac
+          test "$(git rev-parse HEAD)" = "$expected"
+          git diff --check
+          echo "exact sha=$expected"
+      - name: Set up Python for Objective-C++ regressions
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Set up native Windows UCRT64 compiler
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+
+      - name: NEON/scalar numerical regression on Linux and macOS
+        if: inputs.pr == '2511' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          echo "target=${{ runner.os }} arch=$(uname -m)"
+          cc -O3 -std=c11 -Wall -Wextra -Werror -ffp-contract=off -fno-fast-math c/tests/test_sparse_attn.c -lm -o /tmp/coli-sparse-pr2511
+          /tmp/coli-sparse-pr2511
+          cc -O3 -std=c11 -Wall -Wextra -Werror -ffp-contract=off -fno-fast-math c/tests/bench_sparse_attn.c -lm -o /tmp/coli-sparse-bench
+          /tmp/coli-sparse-bench
+      - name: Numerical regression and non-ARM fallback on Windows UCRT64
+        if: inputs.pr == '2511' && runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          gcc -O3 -std=c11 -Wall -Wextra -Werror -ffp-contract=off -fno-fast-math c/tests/test_sparse_attn.c -lm -o ./test_sparse_pr2511.exe
+          ./test_sparse_pr2511.exe
+
+      - name: Compile portable CPU engine on Linux
+        if: inputs.pr == '2512' && runner.os == 'Linux'
+        shell: bash
+        run: make -C c -j2 colibri METAL=0 VK=0 CUDA=0
+      - name: Compile portable CPU engine on Windows UCRT64
+        if: inputs.pr == '2512' && runner.os == 'Windows'
+        shell: msys2 {0}
+        run: make -C c -j2 colibri METAL=0 VK=0 CUDA=0
+      - name: Compile native macOS Metal backend
+        if: inputs.pr == '2512' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "macOS arch=$(uname -m)"
+          make -C c -B backend_metal.o METAL=1
+      - name: Compile and exercise real extracted ARC mutex negative-control fixture
+        if: inputs.pr == '2512' && runner.os == 'macOS'
+        shell: bash
+        run: python -m unittest discover -s c/tests -p test_metal_resolve.py -v
+      - name: Exercise native Metal device when a CI GPU is actually available
+        if: inputs.pr == '2512' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          python -m unittest discover -s c/tests -p test_metal_resolve_device.py -v
+          echo "A hardware SKIP does not qualify Metal device behavior; existing M2 on-device receipt is separate."
