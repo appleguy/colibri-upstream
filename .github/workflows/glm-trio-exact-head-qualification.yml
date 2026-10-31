@@ -1,73 +1,46 @@
-# Manual-only public-fork exact-source QA, no inference, artifacts or caches.
-name: "GLM exact-host PR trio: manual CPU qualification"
+name: Exact GLM nucleus selector #2518 CPU oracle
 on:
   workflow_dispatch:
     inputs:
       pr:
-        description: "Exact whitelisted PR revision to test"
+        description: Verify unchanged exact PR #2518 SHA
         required: true
         type: choice
         options:
-          - "2507"
-          - "2509"
-          - "2506"
-
+          - '2518'
 permissions:
   contents: read
-
 concurrency:
-  group: glm-trio-20261030-${{ inputs.pr }}
+  group: glm2518-exact-20261030-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
-  native:
-    name: "Exact PR #${{ inputs.pr }} / ${{ matrix.os }}"
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+  exact-nucleus:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
-      - name: Resolve strictly whitelisted exact source SHA
-        id: source
-        shell: bash
-        env:
-          SELECTED_PR: ${{ inputs.pr }}
-        run: |
-          case "$SELECTED_PR" in
-            2507) sha=d52cde84e558791987838a1124ee1c6174697174 ;;
-            2509) sha=81eaf8073cb2970e4760a9caa534a4b13118261d ;;
-            2506) sha=17ad27e5b35fba317bd71539a676a34f606b14ae ;;
-            *) echo "Unrecognized exact PR input"; exit 2 ;;
-          esac
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "Testing #$SELECTED_PR at $sha"
-
-      - name: Checkout public fork at exact PR SHA
+      - name: Checkout exact untouched source for PR #2518
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.source.outputs.sha }}
+          repository: appleguy/colibri-upstream
+          ref: 00229be3114e657948b1a08788f673d048554e4d
           persist-credentials: false
-
-      - name: Assert the exact source, no merge ref or drift
-        shell: bash
-        env:
-          EXPECT: ${{ steps.source.outputs.sha }}
-        run: |
-          test "$(git rev-parse HEAD)" = "$EXPECT"
-          git diff --check
-          git status --porcelain
-
-      - uses: actions/setup-python@v5
+      - name: Install Python for source fingerprint verification
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-
-      - name: Install pinned CPU-only Transformers reference dependencies
-        if: inputs.pr != '2509'
-        run: python -m pip install --disable-pip-version-check -r c/tools/requirements-glm53-tiny.txt
-
-      - name: Set up native Windows UCRT64 compiler
+          python-version: '3.13'
+      - name: Verify exact commit and byte-identical 2518 selector
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "00229be3114e657948b1a08788f673d048554e4d"
+          python -c "from pathlib import Path;import hashlib;assert hashlib.sha256(Path('c/glm53_exact_nucleus.h').read_bytes()).hexdigest()=='de079b5d9c217ebc3eedf50a5448000a4c4f6b7cc8c81448d6bcce1d28af4d8a'"
+      - name: Install native ARM64 OpenMP compile dependency
+        if: runner.os == 'macOS'
+        run: brew install libomp
+      - name: Install Windows UCRT64 GCC and Make
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
         with:
@@ -76,113 +49,27 @@ jobs:
           install: >-
             make
             mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-python
-
-      - name: Install native OpenMP runtime on macOS
-        if: runner.os == 'macOS'
-        run: brew install libomp
-
-      - name: Build exact CPU source and targeted checks on Linux and macOS
+      - name: Actual-source 1800 token RNG and 600 mass order oracle
         if: runner.os != 'Windows'
         shell: bash
-        env:
-          SELECTED_PR: ${{ inputs.pr }}
         run: |
-          case "$SELECTED_PR" in
-            2507) make -C c -j2 glm53 tests/test_glm53_live_prefix ;;
-            2509) make -C c -j2 glm53 tests/test_compat_direct ;;
-            2506) make -C c -j2 glm53 tests/test_glm53_host ;;
-          esac
-
-      - name: Run C correctness checks on Linux and macOS
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          SELECTED_PR: ${{ inputs.pr }}
-        run: |
-          case "$SELECTED_PR" in
-            2507) c/tests/test_glm53_live_prefix ;;
-            2509)
-              # The Windows-only check emits an explicit POSIX skip.
-              output="$(c/tests/test_compat_direct)"
-              echo "$output"
-              [[ "$output" == *"skipped (POSIX"* ]]
-              ;;
-            2506) c/tests/test_glm53_host ;;
-          esac
-
-      - name: Build exact CPU source and targeted checks on Windows UCRT64
+          make -C c clean
+          make -C c -j2 METAL=0 VULKAN=0 CUDA=0 tests/test_glm53_nucleus
+          ./c/tests/test_glm53_nucleus
+      - name: Native Windows UCRT64 actual-source oracle
         if: runner.os == 'Windows'
         shell: msys2 {0}
-        env:
-          SELECTED_PR: ${{ inputs.pr }}
         run: |
-          case "$SELECTED_PR" in
-            2507) make -C c -j2 glm53 tests/test_glm53_live_prefix.exe ;;
-            2509) make -C c -j2 glm53 tests/test_compat_direct.exe ;;
-            2506) make -C c -j2 glm53 tests/test_glm53_host.exe ;;
-          esac
-
-      - name: Run C checks and negative control on Windows
-        if: runner.os == 'Windows'
-        shell: msys2 {0}
-        env:
-          SELECTED_PR: ${{ inputs.pr }}
-        run: |
-          cd c
-          case "$SELECTED_PR" in
-            2507)
-              ./tests/test_glm53_live_prefix.exe
-              ;;
-            2509)
-              ./tests/test_compat_direct.exe
-              cp compat.h compat.h.selected
-              trap 'mv compat.h.selected compat.h' EXIT
-              # Reverse exactly the one added flag, without relying on git
-              # inside MSYS2 or shallow-history availability.
-              test "$(grep -c 'FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED' compat.h)" = 1
-              sed -i 's/FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED/FILE_FLAG_NO_BUFFERING/' compat.h
-              gcc -O2 -D_FILE_OFFSET_BITS=64 -fopenmp -o tests/test_compat_direct_baseline.exe tests/test_compat_direct.c -lpsapi
-              if ./tests/test_compat_direct_baseline.exe > baseline-error.log 2>&1; then
-                echo "FAIL: unmodified sync-handle baseline unexpectedly passed"
-                exit 4
-              fi
-              grep -q "direct handle is synchronous" baseline-error.log
-              echo "PASS: unmodified baseline failed the intended handle-mode negative control"
-              mv compat.h.selected compat.h
-              trap - EXIT
-              grep -q 'FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED' compat.h
-              ;;
-            2506)
-              ./tests/test_glm53_host.exe
-              gcc -O2 -D_FILE_OFFSET_BITS=64 -fopenmp -msse4.1 -mno-avx2 -mno-fma \
-                tests/test_glm53_host.c -o tests/test_glm53_host_sse.exe -lm
-              ./tests/test_glm53_host_sse.exe
-              ;;
-          esac
-
-      - name: Generate official CPU Transformers tiny text and multimodal references
-        if: inputs.pr != '2509'
-        shell: bash
-        run: |
-          python c/tools/make_glm53_tiny.py --output c/_qa_text
-          python c/tools/make_glm53_multimodal_tiny.py --output c/_qa_mm
-
-      - name: Generated vendor text, vision, serve, pin oracles on Linux and macOS
-        if: runner.os != 'Windows' && inputs.pr != '2509'
+          make -C c clean
+          make -C c -j2 METAL=0 VULKAN=0 CUDA=0 tests/test_glm53_nucleus.exe
+          ./c/tests/test_glm53_nucleus.exe
+      - name: Linux ASan and UBSan actual-source oracle
+        if: runner.os == 'Linux'
         shell: bash
         env:
-          GLM53_TINY: ${{ github.workspace }}/c/_qa_text
-          GLM53_MM_TINY: ${{ github.workspace }}/c/_qa_mm
+          ASAN_OPTIONS: detect_leaks=0:detect_stack_use_after_return=0:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
-          cd c
-          python -m unittest -v tests.test_glm53_oracles
-
-      - name: Generated vendor text, vision, serve, pin oracles on Windows
-        if: runner.os == 'Windows' && inputs.pr != '2509'
-        shell: msys2 {0}
-        run: |
-          export GLM53_TINY="$(cygpath -w "$PWD/c/_qa_text")"
-          export GLM53_MM_TINY="$(cygpath -w "$PWD/c/_qa_mm")"
-          cd c
-          python -m unittest -v tests.test_glm53_oracles
+          make -C c clean
+          make -C c -j2 METAL=0 VULKAN=0 CUDA=0 tests/test_glm53_nucleus EXTRA_CFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" EXTRA_LDFLAGS="-fsanitize=address,undefined"
+          ./c/tests/test_glm53_nucleus
