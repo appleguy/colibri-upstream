@@ -186,3 +186,16 @@ jobs:
           export GLM53_MM_TINY="$(cygpath -w "$PWD/c/_qa_mm")"
           cd c
           python -m unittest -v tests.test_glm53_oracles
+
+      - name: Full native ASan/UBSan and generated-model serve on Linux
+        if: runner.os == 'Linux' && inputs.pr != '2509'
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0:detect_stack_use_after_return=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          make -C c test-asan
+          make -C c -j2 glm53 EXTRA_CFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" EXTRA_LDFLAGS="-fsanitize=address,undefined"
+          export GLM53_TINY="$GITHUB_WORKSPACE/c/_qa_text"
+          export GLM53_MM_TINY="$GITHUB_WORKSPACE/c/_qa_mm"
+          (cd c && python -m unittest -v tests.test_glm53_oracles)
