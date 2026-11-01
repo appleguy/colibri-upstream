@@ -1,0 +1,76 @@
+name: Exact GLM nucleus selector #2518 CPU oracle
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Verify exact rebased PR #2518 SHA
+        required: true
+        type: choice
+        options:
+          - '2518'
+permissions:
+  contents: read
+concurrency:
+  group: glm2518-exact-20261101-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  exact-nucleus:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact untouched source for PR #2518
+        uses: actions/checkout@v4
+        with:
+          repository: appleguy/colibri-upstream
+          ref: 26e56bd2af7b111f7b607eb8f9f4592a56702ff0
+          persist-credentials: false
+      - name: Install Python for source fingerprint verification
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify exact commit and byte-identical 2518 selector
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "26e56bd2af7b111f7b607eb8f9f4592a56702ff0"
+          python -c "from pathlib import Path;import hashlib;assert hashlib.sha256(Path('c/glm53_exact_nucleus.h').read_bytes().replace(bytes([13,10]),bytes([10]))).hexdigest()=='de079b5d9c217ebc3eedf50a5448000a4c4f6b7cc8c81448d6bcce1d28af4d8a'"
+      - name: Install native ARM64 OpenMP compile dependency
+        if: runner.os == 'macOS'
+        run: brew install libomp
+      - name: Install Windows UCRT64 GCC and Make
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python
+      - name: Actual-source 1800 token RNG and 600 mass order oracle
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          make -C c clean
+          make -C c -j2 METAL=0 VULKAN=0 CUDA=0 tests/test_glm53_nucleus
+          ./c/tests/test_glm53_nucleus
+      - name: Native Windows UCRT64 actual-source oracle
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          make -C c clean
+          make -C c -j2 METAL=0 VULKAN=0 CUDA=0 tests/test_glm53_nucleus.exe
+          ./c/tests/test_glm53_nucleus.exe
+      - name: Linux ASan and UBSan actual-source oracle
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0:detect_stack_use_after_return=0:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          make -C c clean
+          make -C c -j2 METAL=0 VULKAN=0 CUDA=0 tests/test_glm53_nucleus EXTRA_CFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" EXTRA_LDFLAGS="-fsanitize=address,undefined"
+          ./c/tests/test_glm53_nucleus
